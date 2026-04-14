@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node
+node_modules/
+.next/
+
+# 환경변수
+.env
+.env.local
+
+# 기타
+.DS_Store

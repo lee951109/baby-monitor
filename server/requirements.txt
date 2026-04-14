@@ -1,0 +1,25 @@
+# ─────────────────────────────────────────────
+# server/requirements.txt
+# FastAPI 서버에서 필요한 패키지 목록
+# detector에서 보낸 위험 신호를 받아 FCM 알림을 발송하는 역할
+# ─────────────────────────────────────────────
+
+# FastAPI: Python 웹 서버 프레임워크
+# detector(RPi5)에서 오는 위험 신호를 HTTP로 수신
+fastapi
+
+# uvicorn: FastAPI 실행 엔진
+# "python으로 만든 서버를 실제로 구동시키는 역할"
+uvicorn
+
+# firebase-admin: FCM 푸시 알림 발송용 Google 공식 SDK
+# 위험 신호 수신 시 보호자 핸드폰으로 알림 전송
+firebase-admin
+
+# python-multipart: RPi5가 보내는 스냅샷 이미지 파일 수신
+# HTTP multipart/form-data 형식으로 전송된 이미지를 파싱
+python-multipart
+
+# python-dotenv: .env 파일에서 환경변수 읽기
+# Firebase 키 등 민감한 정보를 코드에 직접 쓰지 않기 위해
+python-dotenv

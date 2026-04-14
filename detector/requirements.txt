@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────
+# detector/requirements.txt
+# 감지 서버(RPi5 또는 노트북)에서 필요한 패키지 목록
+# pip install -r requirements.txt 로 한 번에 설치
+# ─────────────────────────────────────────────
+
+# YOLOv8: 이불/베개 등 피복 객체 감지 모델
+# "화면에 이불이 있는가?"를 판단하는 역할
+ultralytics
+
+# MediaPipe: 얼굴 랜드마크 468점 실시간 감지
+# "얼굴이 어디 있는가, 얼마나 가려졌는가?"를 판단하는 역할
+mediapipe
+
+# OpenCV: 웹캠/카메라 영상 읽기 및 이미지 전처리
+# 모든 영상 처리의 기반 라이브러리
+opencv-python
+
+# NumPy: 좌표 간 거리 계산, 이동 벡터 분석
+# "피복이 얼굴 방향으로 접근 중인가?"를 수학적으로 계산
+numpy
+
+# Requests: FastAPI 서버로 위험 신호 HTTP 전송
+# 감지 결과를 서버에 알리는 역할
+requests
+
+# python-dotenv: .env 파일에서 환경변수 읽기
+# 서버 주소, API 키 등 민감한 정보를 코드에 직접 쓰지 않기 위해
+python-dotenv
