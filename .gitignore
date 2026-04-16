@@ -13,3 +13,6 @@ node_modules/
 
 # 기타
 .DS_Store
+
+# Firebase 서비스 키
+server/firebase-adminsdk.json
