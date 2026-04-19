@@ -18,7 +18,14 @@ import threading    # heartbeat를 별도 스레드로 실행
 from collections import deque # 피복 이동 궤적 저장 (최근 N프레임)
 
 # MediaPipe: 얼굴 랜드마크 468점 실시간 감지
-import mediapipe as mp
+from mediapipe.tasks import python as mp_tasks
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import FaceLandmarker
+from mediapipe.tasks.python.components.containers import NormalizedLandmark
+
+import mediapipe as mp                          # mp.Image, mp.ImageFormat 사용
+from mediapipe.tasks import python as mp_tasks  # BaseOptions 사용
+from mediapipe.tasks.python import vision       # FaceLandmarker 사용
 
 # YOLOv8: 이불/배개 등 피복 객체 감지
 from ultralytics import YOLO
@@ -27,11 +34,14 @@ from ultralytics import YOLO
 from alert import send_alert, send_heartbeat
 
 
+# 상수 블록 전체 교체
 # ── 설정값 ─────────────────────────────────
-# 위험 단계별 임계값 (픽셀 단위)
-CAUTION_DISTANCE = 150      # 경고: 피복이 얼굴로부터 150px 이내 접근
-DANGER_DISTANCE = 60        # 위험: 피복이 얼굴로부터 60px 이내 접근
-EMERGENCY_IOU = 0.3         # 긴급: 피복이 얼굴 bbox가 30% 이상 중첩
+# IoU 단일 기준으로 위험 단계 판단
+# IoU = 피복과 얼굴 bbox의 중첩 비율 (0.0 ~ 1.0)
+# 픽셀 거리 방식은 카메라 거리/해상도에 따라 오탐지가 심해서 제외
+CAUTION_IOU = 0.05    # 5% 이상 중첩 → 경고
+DANGER_IOU = 0.15     # 15% 이상 중첩 → 위험
+EMERGENCY_IOU = 0.30  # 30% 이상 중첩 → 긴급
 
 # 피복 이동 궤적 분석용 프레임 수
 # 최근 10프레임의 피복 위치를 저장해 이동 방향 계산
@@ -44,14 +54,21 @@ HEARTBEAT_INTERVAL = 30
 # YOLOv8n: 가장 가벼운 nano 모델
 # CPU에서도 실시간(10~15fps) 동작 가능
 # 첫 실행 시 모델 파일(yolov8n.pt) 자동 다운로드
-model = YOLO("yolo8n.pt")
+model = YOLO("yolov8n.pt")
 
-# MediaPipe FaceMesh 초기화
-# min_detection_confidence: 0.5 미만 신뢰도면 얼굴로 인식 안 함
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh= mp_face_mesh.FaceMesh(
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+# FaceLandmarker 옵션 설정
+base_options = mp_tasks.BaseOptions(
+    model_asset_path="face_landmarker.task"  # 방금 다운로드한 모델 파일
+)
+face_landmarker_options = vision.FaceLandmarkerOptions(
+    base_options=base_options,
+    min_face_detection_confidence=0.5,  # 얼굴 감지 최소 신뢰도
+    min_face_presence_confidence=0.5,   # 얼굴 존재 최소 신뢰도
+    min_tracking_confidence=0.5         # 추적 최소 신뢰도
+)
+# with 문 없이 직접 생성
+face_landmarker = vision.FaceLandmarker.create_from_options(
+    face_landmarker_options
 )
 
 # 피복 객체 이동 궤적 저장
@@ -61,25 +78,35 @@ cover_history = deque(maxlen=TRAJECTORY_FRAMES)
 
 def get_face_bbox(frame):
     """
-    MediaPipe로 얼굴 랜드마크를 감지하고 bbox 반환
+    MediaPipe FaceLandmarker로 얼굴 랜드마크를 감지하고 bbox 반환
 
     입력: BGR 이미지 (OpenCV 기본 포맷)
     출력: (x, y, w, h) 튜플 또는 None (얼굴 미감지 시)
 
-    MediaPipe는 RGB를 요구하므로 BGR->RGB 변환 필요
+    새로운 MediaPipe tasks API는 mp.Image 포맷을 요구함
+    BGR → RGB 변환 후 mp.Image로 감싸서 전달
     """
-
-    #OpenCV는 BGR, MediaPipe는 RGB 사용 -> 변환 필요
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
-
-    if not results.multi_face_landmarks:
-        return None # 얼굴 미감지
-    
     h, w = frame.shape[:2]
-    landmarks = results.multi_face_landmarks[0].landmark
 
-    # 랜드마크 468개의 x, y 좌표로 얼굴 bbox 계산
+    # BGR → RGB 변환 후 MediaPipe Image 포맷으로 변환
+    # 새로운 tasks API는 mp.Image를 입력으로 받음
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(
+        image_format=mp.ImageFormat.SRGB,
+        data=rgb_frame
+    )
+
+    # 얼굴 랜드마크 감지
+    results = face_landmarker.detect(mp_image)
+
+    # 감지된 얼굴이 없으면 None 반환
+    if not results.face_landmarks:
+        return None
+
+    # 첫 번째 얼굴의 랜드마크로 bbox 계산
+    landmarks = results.face_landmarks[0]
+
+    # 정규화된 좌표(0.0~1.0)를 픽셀 좌표로 변환
     xs = [lm.x * w for lm in landmarks]
     ys = [lm.y * h for lm in landmarks]
 
@@ -91,27 +118,47 @@ def get_face_bbox(frame):
 
 def get_cover_bboxes(frame):
     """
-    YOLO로 이불/배개 등 피복 객체를 감지하고 bbox 목록 반환
+    YOLO로 피복 객체를 감지하고 bbox 목록 반환
 
-    입력: BGR 이미지
-    출력: [(x, y, w, h), ...] 리스트 (감지된 피복 객체들)
+    핵심 변경:
+        사람(class 0)을 명시적으로 제외
+        사람 몸통이 COVER로 잡혀 오탐지되는 문제 해결
 
-    COCO 데이터셋 기준 피복 관련 클래스:
-    - 57: handbag → 이불/베개 근사값으로 활용
-    - 58: tie
-    - 65: bed
-    - 67: cell phone
-    실제 서비스에서는 신생아 전용 데이터셋으로 파인튜닝 필요
+    COCO 클래스 중 제외 대상:
+        0: person  ← 반드시 제외 (몸통이 얼굴 bbox를 감싸서 오탐지)
+
+    나머지는 일단 모두 포함
+    추후 파인튜닝 후 침구 클래스만 남길 예정
     """
-
-    # verbose=False: 로그 출력 억제
     results = model(frame, verbose=False)
     bboxes = []
 
+    # COCO 클래스 중 명시적으로 제외할 목록
+    # person(0)이 가장 중요 — 몸통이 얼굴을 감싸서 항상 높은 IoU 발생
+    EXCLUDE_CLASSES = {
+        0,   # person
+        1,   # bicycle
+        2,   # car
+        3,   # motorcycle
+        4,   # airplane
+        5,   # bus
+        6,   # train
+        7,   # truck
+        8,   # boat
+    }
+
     for box in results[0].boxes:
         cls_id = int(box.cls)
-        # 임시: 모든 객체를 피복으로 감지 (추후 클래스 필터링 필요)
-        # TODO: 파인튜닝 후 특정 클래스만 필터링
+
+        # 제외 클래스 스킵
+        if cls_id in EXCLUDE_CLASSES:
+            continue
+
+        # 신뢰도 0.5 미만 제외
+        confidence = float(box.conf)
+        if confidence < 0.5:
+            continue
+
         x1, y1, x2, y2 = map(int, box.xyxy[0])
         bboxes.append((x1, y1, x2 - x1, y2 - y1))
 
@@ -200,49 +247,43 @@ def is_approaching_face(face_bbox, cover_history):
 
 def analyze_threat(face_bbox, cover_bboxes):
     """
-    얼굴과 피복 정보를 종합해 위험 단계 판단
+    얼굴과 피복의 IoU만으로 위험 단계 판단
 
-    입력:
-        face_bbox: 얼굴 bbox
-        cover_bboxes: 감지된 피복 bbox 목록
+    픽셀 거리 방식 대신 IoU를 쓰는 이유:
+        - IoU는 비율 기반이라 카메라 거리/해상도에 영향받지 않음
+        - 픽셀 거리는 배경 물체에 의한 오탐지가 너무 많음
+        - IoU가 0이면 아예 겹치지 않으므로 배경 물체는 자연히 제외됨
 
     출력: (위험단계, IoU값) 튜플
-        0 = 안전
-        1 = 경고 (피복 접근 중)
-        2 = 위험 (피복 근접)
-        3 = 긴급 (피복 중첩)
+        0 = 안전  (IoU 5% 미만)
+        1 = 경고  (IoU 5% 이상)
+        2 = 위험  (IoU 15% 이상)
+        3 = 긴급  (IoU 30% 이상)
     """
-
-    # 피복 미감지 = 안전
     if not cover_bboxes:
-        return 0, 0.0 
-    
-    max_iou = 0.0
-    min_distance = float('inf')
+        return 0, 0.0
 
+    # 모든 피복 중 얼굴과 가장 많이 겹치는 것 기준
+    max_iou = 0.0
     for cover_bbox in cover_bboxes:
         iou = calculate_iou(face_bbox, cover_bbox)
-        distance = calculate_distance(face_bbox, cover_bbox)
 
-        # 피복 중심점을 궤적에 추가
+        # 피복 중심점 궤적 저장 (is_approaching_face에서 사용)
         cover_cx = cover_bbox[0] + cover_bbox[2] / 2
         cover_cy = cover_bbox[1] + cover_bbox[3] / 2
         cover_history.append((cover_cx, cover_cy))
 
         max_iou = max(max_iou, iou)
-        min_distance = min(min_distance, distance)
 
-    approaching = is_approaching_face(face_bbox, cover_history)
-
-    # 위험 단계 판단 (높은 단계부터 체크)
+    # IoU 기준 위험 단계 판단 (높은 단계부터 체크)
     if max_iou >= EMERGENCY_IOU:
-        return 3, max_iou   # 긴급: 이미 덮임
-    elif min_distance < DANGER_DISTANCE and approaching:
-        return 2, max_iou   # 위험: 빠르게 접근 중
-    elif min_distance < CAUTION_DISTANCE and approaching:
-        return 1, max_iou   # 경고: 접근 중
+        return 3, max_iou
+    elif max_iou >= DANGER_IOU:
+        return 2, max_iou
+    elif max_iou >= CAUTION_IOU:
+        return 1, max_iou
     else:
-        return 0, max_iou   # 안전
+        return 0, max_iou
     
 
 def draw_debug(frame, face_bbox, cover_bboxes, threat_level, iou):
@@ -333,7 +374,7 @@ def main():
         if face_bbox is None:
             # 얼굴이 감지되지 않으면 다음 프레임으로
             cv2.putText(frame, "얼굴 미감지", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 (128, 128, 128), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
             cv2.imshow("Baby Monitor", frame)
         else:
             # 피복 감지
